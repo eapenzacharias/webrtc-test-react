@@ -11,6 +11,9 @@ interface RoomState {
 
 export function useWebRTC(roomId: string) {
   const pcRef = useRef<RTCPeerConnection | null>(null);
+  const iceServersRef = useRef<any>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+
   const [state, setState] = useState<RoomState>({
     sessionId: null,
     room: null,
@@ -26,17 +29,20 @@ export function useWebRTC(roomId: string) {
     setLogs((prev) => [...prev.slice(-99), entry]);
   }, []);
 
-  // Step 1: Join room — get CF session + ICE servers
+  // Step 1: Join room — get session + ICE servers
   const join = useCallback(async () => {
     try {
       log("Joining room...");
       const res = await api.joinRoom(roomId);
       log(`Joined! session_id=${res.session_id}`);
 
-      // ice_servers is already an array in the response, use it directly
-      const iceServers = Array.isArray(res.ice_servers) && res.ice_servers.length > 0
-        ? res.ice_servers
-        : [{ urls: "stun:stun.cloudflare.com:3478" }];
+      const iceServers =
+        Array.isArray(res.ice_servers) && res.ice_servers.length > 0
+          ? res.ice_servers
+          : [{ urls: "stun:stun.cloudflare.com:3478" }];
+
+      // Store in ref so publishTracks always has the latest value
+      iceServersRef.current = iceServers;
 
       setState((s) => ({
         ...s,
@@ -61,38 +67,60 @@ export function useWebRTC(roomId: string) {
         video: true,
       });
 
-      // Create PeerConnection
-      const pc = new RTCPeerConnection({
-        iceServers: state.iceServers || [
-          { urls: "stun:stun.cloudflare.com:3478" },
-        ],
-      });
+      // Clean up any existing PeerConnection before creating a new one
+      if (pcRef.current) {
+        log("Closing previous PeerConnection...");
+        pcRef.current.close();
+        pcRef.current = null;
+      }
+
+      // Read ICE servers from ref (avoids stale closure)
+      const iceServers = iceServersRef.current || [
+        { urls: "stun:stun.cloudflare.com:3478" },
+      ];
+
+      const pc = new RTCPeerConnection({ iceServers });
       pcRef.current = pc;
 
-      // Add local tracks to PC
-      const trackInfos: { trackName: string; mid: string; kind: string }[] = [];
-      stream.getTracks().forEach((track, i) => {
-        const sender = pc.addTrack(track, stream);
-        const transceiver = pc.getTransceivers().find(
-          (t) => t.sender === sender
-        );
-        const trackName = `${track.kind}-${i}`;
-        trackInfos.push({
-          trackName,
-          mid: transceiver?.mid || String(i),
-          kind: track.kind,
+      // Set up ontrack handler early so we never miss incoming tracks
+      pc.ontrack = (event) => {
+        log(`Remote track received: ${event.track.kind}`);
+        const remoteStream =
+          event.streams[0] || new MediaStream([event.track]);
+        // Use the stream ID as the key so multiple tracks from the same
+        // stream are grouped together
+        setState((s) => {
+          const updated = new Map(s.remoteStreams);
+          updated.set(remoteStream.id, remoteStream);
+          return { ...s, remoteStreams: updated };
         });
-        log(`Added local track: ${trackName} (${track.kind})`);
+      };
+
+      // Add local tracks to PC
+      stream.getTracks().forEach((track) => {
+        pc.addTrack(track, stream);
+        log(`Added local track: ${track.kind}`);
       });
 
-      // Create offer
+      // Create offer — mids are assigned after setLocalDescription
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       log("Created SDP offer");
 
+      // Now read mids from transceivers (they're set after setLocalDescription)
+      const trackInfos = pc.getTransceivers()
+        .filter((t) => t.sender.track)
+        .map((t) => ({
+          trackName: `${t.sender.track!.kind}-${t.mid}`,
+          mid: t.mid || "0",
+          kind: t.sender.track!.kind,
+        }));
+
       // Send to backend
       const res = await api.publish(roomId, offer.sdp!, trackInfos);
-      log(`Publish response: answer_sdp received, ${res.tracks?.length || 0} tracks confirmed`);
+      log(
+        `Publish response: answer_sdp received, ${res.tracks?.length || 0} tracks confirmed`
+      );
 
       // Set remote answer
       if (res.answer_sdp) {
@@ -110,18 +138,23 @@ export function useWebRTC(roomId: string) {
         await pc.setLocalDescription(reOffer);
         const reRes = await api.renegotiate(roomId, reOffer.sdp!);
         if (reRes.sdp) {
-          await pc.setRemoteDescription({ type: reRes.type, sdp: reRes.sdp });
+          await pc.setRemoteDescription({
+            type: reRes.type || "answer",
+            sdp: reRes.sdp,
+          });
           log("Renegotiation complete");
         }
       }
 
+      // Store in ref so leave() always has the current stream
+      localStreamRef.current = stream;
       setState((s) => ({ ...s, localStream: stream }));
       return res;
     } catch (e: any) {
       log(`Publish failed: ${e.message}`);
       throw e;
     }
-  }, [roomId, state.iceServers, log]);
+  }, [roomId, log]);
 
   // Step 3: Subscribe to a remote participant's tracks
   const subscribeTo = useCallback(
@@ -131,18 +164,6 @@ export function useWebRTC(roomId: string) {
 
         const pc = pcRef.current;
         if (!pc) throw new Error("No PeerConnection — publish first");
-
-        // Listen for incoming tracks
-        pc.ontrack = (event) => {
-          log(`Remote track received: ${event.track.kind}`);
-          const stream =
-            event.streams[0] || new MediaStream([event.track]);
-          setState((s) => {
-            const updated = new Map(s.remoteStreams);
-            updated.set(remoteSessionId, stream);
-            return { ...s, remoteStreams: updated };
-          });
-        };
 
         // Add recvonly transceivers for the tracks we want to receive
         for (const name of trackNames) {
@@ -169,7 +190,10 @@ export function useWebRTC(roomId: string) {
         const answerSdp = res.answer_sdp || res.sdp;
         const answerType = res.answer_type || res.type || "answer";
         if (answerSdp) {
-          await pc.setRemoteDescription({ type: answerType, sdp: answerSdp });
+          await pc.setRemoteDescription({
+            type: answerType,
+            sdp: answerSdp,
+          });
           log("Set remote description (subscribe answer)");
         }
 
@@ -180,7 +204,10 @@ export function useWebRTC(roomId: string) {
           await pc.setLocalDescription(reOffer);
           const reRes = await api.renegotiate(roomId, reOffer.sdp!);
           if (reRes.sdp) {
-            await pc.setRemoteDescription({ type: reRes.type, sdp: reRes.sdp });
+            await pc.setRemoteDescription({
+              type: reRes.type || "answer",
+              sdp: reRes.sdp,
+            });
           }
           log("Subscribe renegotiation complete");
         }
@@ -200,10 +227,14 @@ export function useWebRTC(roomId: string) {
     try {
       log("Leaving room...");
 
-      // Cleanup local media
-      state.localStream?.getTracks().forEach((t) => t.stop());
+      // Use refs to avoid stale closures
+      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+      localStreamRef.current = null;
+
       pcRef.current?.close();
       pcRef.current = null;
+
+      iceServersRef.current = null;
 
       await api.leaveRoom(roomId);
       log("Left room");
@@ -218,7 +249,7 @@ export function useWebRTC(roomId: string) {
     } catch (e: any) {
       log(`Leave failed: ${e.message}`);
     }
-  }, [roomId, state.localStream, log]);
+  }, [roomId, log]);
 
   return { ...state, logs, log, join, publishTracks, subscribeTo, leave };
 }
