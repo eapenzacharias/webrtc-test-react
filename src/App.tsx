@@ -52,22 +52,30 @@ export default function App() {
   };
 
   const handleJoin = async () => {
-    try { await webrtc.join(); } catch {}
+    try { await webrtc.join(); } catch (e: any) {
+      webrtc.log(`Join error: ${e.message}`);
+    }
   };
 
   const handlePublish = async () => {
-    try { await webrtc.publishTracks(); } catch {}
+    try { await webrtc.publishTracks(); } catch (e: any) {
+      webrtc.log(`Publish error: ${e.message}`);
+    }
   };
 
   const handleSubscribe = async () => {
     try {
       const names = remoteTracks.split(",").map((s) => s.trim());
       await webrtc.subscribeTo(remoteSession, names);
-    } catch {}
+    } catch (e: any) {
+      webrtc.log(`Subscribe error: ${e.message}`);
+    }
   };
 
   const handleLeave = async () => {
-    try { await webrtc.leave(); } catch {}
+    try { await webrtc.leave(); } catch (e: any) {
+      webrtc.log(`Leave error: ${e.message}`);
+    }
   };
 
   return (
