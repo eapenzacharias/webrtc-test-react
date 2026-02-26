@@ -1,0 +1,15 @@
+{
+  "files": {
+    "main.css": "/webrtc-test-react/static/css/main.e6c13ad2.css",
+    "main.js": "/webrtc-test-react/static/js/main.adea5124.js",
+    "static/js/453.45c28d43.chunk.js": "/webrtc-test-react/static/js/453.45c28d43.chunk.js",
+    "index.html": "/webrtc-test-react/index.html",
+    "main.e6c13ad2.css.map": "/webrtc-test-react/static/css/main.e6c13ad2.css.map",
+    "main.adea5124.js.map": "/webrtc-test-react/static/js/main.adea5124.js.map",
+    "453.45c28d43.chunk.js.map": "/webrtc-test-react/static/js/453.45c28d43.chunk.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.e6c13ad2.css",
+    "static/js/main.adea5124.js"
+  ]
+}
