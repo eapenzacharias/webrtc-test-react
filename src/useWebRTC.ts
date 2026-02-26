@@ -13,6 +13,7 @@ export function useWebRTC(roomId: string) {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const iceServersRef = useRef<RTCIceServer[]>([]);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
 
   const [state, setState] = useState<RoomState>({
     sessionId: null,
@@ -87,8 +88,9 @@ export function useWebRTC(roomId: string) {
 
       log(`ICE servers: ${iceServers.length} entries`);
 
-      // Store in ref so callbacks always have the latest value
+      // Store in refs so callbacks always have the latest value
       iceServersRef.current = iceServers;
+      sessionIdRef.current = res.session_id;
 
       setState((s) => ({
         ...s,
@@ -141,9 +143,10 @@ export function useWebRTC(roomId: string) {
         `Track mids: ${trackInfos.map((t) => `${t.trackName}=${t.mid}`).join(", ")}`
       );
 
-      // Send to backend
+      // Send to backend (include session_id for Cloudflare session association)
       const res = await api.publish(
         roomId,
+        sessionIdRef.current!,
         pc.localDescription!.sdp,
         trackInfos
       );
@@ -168,7 +171,7 @@ export function useWebRTC(roomId: string) {
         log("Server requires immediate renegotiation...");
         const reOffer = await pc.createOffer();
         await pc.setLocalDescription(reOffer);
-        const reRes = await api.renegotiate(roomId, pc.localDescription!.sdp);
+        const reRes = await api.renegotiate(roomId, sessionIdRef.current!, pc.localDescription!.sdp);
         if (reRes.sdp) {
           await pc.setRemoteDescription({
             type: reRes.type || "answer",
@@ -214,9 +217,10 @@ export function useWebRTC(roomId: string) {
           sessionId: remoteSessionId,
         }));
 
-        // Send SDP offer + tracks to backend
+        // Send SDP offer + tracks to backend (include session_id)
         const res = await api.subscribe(
           roomId,
+          sessionIdRef.current!,
           pc.localDescription!.sdp,
           tracks
         );
@@ -247,7 +251,7 @@ export function useWebRTC(roomId: string) {
           log("Subscribe requires renegotiation...");
           const reOffer = await pc.createOffer();
           await pc.setLocalDescription(reOffer);
-          const reRes = await api.renegotiate(roomId, pc.localDescription!.sdp);
+          const reRes = await api.renegotiate(roomId, sessionIdRef.current!, pc.localDescription!.sdp);
           if (reRes.sdp) {
             await pc.setRemoteDescription({
               type: reRes.type || "answer",
@@ -279,6 +283,7 @@ export function useWebRTC(roomId: string) {
       pcRef.current = null;
 
       iceServersRef.current = [];
+      sessionIdRef.current = null;
 
       await api.leaveRoom(roomId);
       log("Left room");

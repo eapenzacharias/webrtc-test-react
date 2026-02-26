@@ -37,10 +37,12 @@ export const joinRoom = (roomId: string, participantType = "publisher") =>
 // POST /webrtc/rooms/:room_id/publish
 export const publish = (
   roomId: string,
+  sessionId: string,
   sdp: string,
-  tracks: { trackName: string; mid: string; kind: string }[]
+  tracks: { trackName: string; mid: string; kind: string }[],
 ) =>
   request("POST", `/webrtc/rooms/${roomId}/publish`, {
+    session_id: sessionId,
     sdp,
     type: "offer",
     tracks,
@@ -49,20 +51,33 @@ export const publish = (
 // POST /webrtc/rooms/:room_id/subscribe
 export const subscribe = (
   roomId: string,
+  sessionId: string,
   sdp: string,
-  tracks: { trackName: string; sessionId: string }[]
-) => request("POST", `/webrtc/rooms/${roomId}/subscribe`, { sdp, type: "offer", tracks });
+  tracks: { trackName: string; sessionId: string }[],
+) =>
+  request("POST", `/webrtc/rooms/${roomId}/subscribe`, {
+    session_id: sessionId,
+    sdp,
+    type: "offer",
+    tracks,
+  });
 
 // POST /webrtc/rooms/:room_id/subscribe/answer
-export const subscribeAnswer = (roomId: string, sdp: string) =>
+export const subscribeAnswer = (
+  roomId: string,
+  sessionId: string,
+  sdp: string,
+) =>
   request("POST", `/webrtc/rooms/${roomId}/subscribe/answer`, {
+    session_id: sessionId,
     sdp,
     type: "answer",
   });
 
 // POST /webrtc/rooms/:room_id/renegotiate
-export const renegotiate = (roomId: string, sdp: string) =>
+export const renegotiate = (roomId: string, sessionId: string, sdp: string) =>
   request("POST", `/webrtc/rooms/${roomId}/renegotiate`, {
+    session_id: sessionId,
     sdp,
     type: "offer",
   });
