@@ -118,6 +118,7 @@ export function useWebRTC(roomId: string) {
 
       // Send to backend
       const res = await api.publish(roomId, offer.sdp!, trackInfos);
+      log(`Publish response keys: ${Object.keys(res).join(", ")}`);
       log(
         `Publish response: answer_sdp received, ${res.tracks?.length || 0} tracks confirmed`
       );
@@ -184,17 +185,20 @@ export function useWebRTC(roomId: string) {
 
         // Send offer + tracks to subscribe endpoint
         const res = await api.subscribe(roomId, offer.sdp!, tracks);
-        log(`Subscribe response received`);
+        log(`Subscribe response keys: ${Object.keys(res).join(", ")}`);
+        log(`Subscribe response: ${JSON.stringify(res).slice(0, 500)}`);
 
-        // Set the answer from the server
-        const answerSdp = res.answer_sdp || res.sdp;
-        const answerType = res.answer_type || res.type || "answer";
+        // Set the answer from the server — try multiple possible field names
+        const answerSdp = res.answer_sdp || res.sdp || res.answerSdp || res.description?.sdp;
+        const answerType = res.answer_type || res.type || res.answerType || res.description?.type || "answer";
         if (answerSdp) {
           await pc.setRemoteDescription({
             type: answerType,
             sdp: answerSdp,
           });
           log("Set remote description (subscribe answer)");
+        } else {
+          log("WARNING: No answer SDP found in subscribe response!");
         }
 
         // Handle renegotiation if needed
