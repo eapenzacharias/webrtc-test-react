@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
 import { setToken, getConfig } from "./api";
 import { useWebRTC } from "./useWebRTC";
+import "./App.css";
 
 function VideoPlayer({ stream, muted, label }: {
   stream: MediaStream | null;
@@ -14,15 +15,9 @@ function VideoPlayer({ stream, muted, label }: {
     }
   }, [stream]);
   return (
-    <div style={{ margin: 8 }}>
-      <div style={{ fontWeight: "bold", marginBottom: 4 }}>{label}</div>
-      <video
-        ref={ref}
-        autoPlay
-        playsInline
-        muted={muted}
-        style={{ width: 320, height: 240, background: "#222" }}
-      />
+    <div className="video-cell">
+      <div className="video-label">{label}</div>
+      <video ref={ref} autoPlay playsInline muted={muted} />
     </div>
   );
 }
@@ -79,22 +74,20 @@ export default function App() {
   };
 
   return (
-    <div style={{ fontFamily: "monospace", padding: 20 }}>
+    <div className="app">
       <h2>Convose WebRTC Test</h2>
 
       {/* Auth */}
-      <div style={{ marginBottom: 16 }}>
+      <div className="auth-section">
         <input
           placeholder="Auth token"
           value={token}
           onChange={(e) => setTokenInput(e.target.value)}
-          style={{ width: 400, marginRight: 8 }}
         />
         <input
           placeholder="Room ID (chat channel)"
           value={roomId}
           onChange={(e) => setRoomId(e.target.value)}
-          style={{ width: 250, marginRight: 8 }}
         />
         <button onClick={handleConnect} disabled={!token || !roomId}>
           Set Token
@@ -104,7 +97,7 @@ export default function App() {
       {connected && (
         <>
           {/* Actions */}
-          <div style={{ marginBottom: 16, display: "flex", gap: 8 }}>
+          <div className="actions">
             <button onClick={handleGetConfig}>Get Config</button>
             <button onClick={handleJoin} disabled={!!webrtc.sessionId}>
               Join Room
@@ -119,18 +112,16 @@ export default function App() {
 
           {/* Subscribe controls */}
           {webrtc.sessionId && (
-            <div style={{ marginBottom: 16 }}>
+            <div className="subscribe-section">
               <input
                 placeholder="Remote session ID"
                 value={remoteSession}
                 onChange={(e) => setRemoteSession(e.target.value)}
-                style={{ width: 300, marginRight: 8 }}
               />
               <input
                 placeholder="Track names (comma-sep)"
                 value={remoteTracks}
                 onChange={(e) => setRemoteTracks(e.target.value)}
-                style={{ width: 200, marginRight: 8 }}
               />
               <button onClick={handleSubscribe} disabled={!remoteSession}>
                 Subscribe
@@ -140,25 +131,23 @@ export default function App() {
 
           {/* Config */}
           {config && (
-            <pre style={{ background: "#f5f5f5", padding: 8, marginBottom: 16 }}>
+            <pre className="config-block">
               {JSON.stringify(config, null, 2)}
             </pre>
           )}
 
           {/* Room state */}
           {webrtc.room && (
-            <details style={{ marginBottom: 16 }}>
+            <details className="room-details">
               <summary>
                 Room state (session: {webrtc.sessionId})
               </summary>
-              <pre style={{ background: "#f5f5f5", padding: 8 }}>
-                {JSON.stringify(webrtc.room, null, 2)}
-              </pre>
+              <pre>{JSON.stringify(webrtc.room, null, 2)}</pre>
             </details>
           )}
 
           {/* Video */}
-          <div style={{ display: "flex", flexWrap: "wrap" }}>
+          <div className="video-grid">
             {webrtc.localStream && (
               <VideoPlayer
                 stream={webrtc.localStream}
@@ -179,17 +168,7 @@ export default function App() {
           </div>
 
           {/* Logs */}
-          <div
-            style={{
-              marginTop: 16,
-              background: "#1e1e1e",
-              color: "#0f0",
-              padding: 12,
-              height: 200,
-              overflow: "auto",
-              fontSize: 12,
-            }}
-          >
+          <div className="log-panel">
             {webrtc.logs.map((l, i) => (
               <div key={i}>{l}</div>
             ))}
