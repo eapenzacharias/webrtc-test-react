@@ -66,7 +66,7 @@ export const joinRoom = (roomId: string, participantType = "publisher") =>
 export const publish = (
   roomId: string,
   sdp: string,
-  tracks: { trackName: string; mid: string; kind: string }[]
+  tracks: { trackName: string; mid: string; kind: string }[],
 ) =>
   request("POST", `/webrtc/rooms/${roomId}/publish`, {
     sdp,
@@ -77,8 +77,14 @@ export const publish = (
 // POST /webrtc/rooms/:room_id/subscribe
 export const subscribe = (
   roomId: string,
-  tracks: { trackName: string; sessionId: string }[]
-) => request("POST", `/webrtc/rooms/${roomId}/subscribe`, { tracks });
+  sdp: string,
+  tracks: { trackName: string; sessionId: string }[],
+) =>
+  request("POST", `/webrtc/rooms/${roomId}/subscribe`, {
+    sdp,
+    type: "offer",
+    tracks,
+  });
 
 // POST /webrtc/rooms/:room_id/subscribe/answer
 export const subscribeAnswer = (roomId: string, sdp: string) =>
@@ -112,7 +118,7 @@ import * as api from "./api";
 interface RoomState {
   sessionId: string | null;
   room: any;
-  iceServers: any;
+  iceServers: RTCIceServer[];
   localStream: MediaStream | null;
   remoteStreams: Map<string, MediaStream>;
 }
@@ -122,7 +128,7 @@ export function useWebRTC(roomId: string) {
   const [state, setState] = useState<RoomState>({
     sessionId: null,
     room: null,
-    iceServers: null,
+    iceServers: [],
     localStream: null,
     remoteStreams: new Map(),
   });
@@ -134,6 +140,31 @@ export function useWebRTC(roomId: string) {
     setLogs((prev) => [...prev.slice(-99), entry]);
   }, []);
 
+  // Helper: create RTCPeerConnection with monitoring
+  const createPC = useCallback(
+    (iceServers: RTCIceServer[]) => {
+      const pc = new RTCPeerConnection({
+        iceServers,
+        bundlePolicy: "max-bundle", // required by Cloudflare Calls
+      });
+
+      pc.oniceconnectionstatechange = () =>
+        log(`ICE connection: ${pc.iceConnectionState}`);
+      pc.onconnectionstatechange = () =>
+        log(`PC connection: ${pc.connectionState}`);
+      pc.onicegatheringstatechange = () =>
+        log(`ICE gathering: ${pc.iceGatheringState}`);
+      pc.onicecandidate = (e) => {
+        if (e.candidate)
+          log(`ICE candidate: ${e.candidate.candidate.slice(0, 60)}...`);
+      };
+
+      pcRef.current = pc;
+      return pc;
+    },
+    [log],
+  );
+
   // Step 1: Join room — get CF session + ICE servers
   const join = useCallback(async () => {
     try {
@@ -141,16 +172,13 @@ export function useWebRTC(roomId: string) {
       const res = await api.joinRoom(roomId);
       log(`Joined! session_id=${res.session_id}`);
 
-      // Build ICE config from server response
-      const iceServers = res.ice_servers
-        ? [
-            {
-              urls: res.ice_servers.urls,
-              username: res.ice_servers.username,
-              credential: res.ice_servers.credential,
-            },
-          ]
-        : [{ urls: "stun:stun.cloudflare.com:3478" }];
+      // ice_servers is already an array of RTCIceServer objects
+      const iceServers: RTCIceServer[] =
+        Array.isArray(res.ice_servers) && res.ice_servers.length > 0
+          ? res.ice_servers
+          : [{ urls: "stun:stun.cloudflare.com:3478" }];
+
+      log(`ICE servers: ${iceServers.length} entries`);
 
       setState((s) => ({
         ...s,
@@ -175,38 +203,39 @@ export function useWebRTC(roomId: string) {
         video: true,
       });
 
-      // Create PeerConnection
-      const pc = new RTCPeerConnection({
-        iceServers: state.iceServers || [
-          { urls: "stun:stun.cloudflare.com:3478" },
-        ],
-      });
-      pcRef.current = pc;
+      const pc = createPC(state.iceServers);
 
       // Add local tracks to PC
-      const trackInfos: { trackName: string; mid: string; kind: string }[] = [];
-      stream.getTracks().forEach((track, i) => {
-        const sender = pc.addTrack(track, stream);
-        const transceiver = pc.getTransceivers().find(
-          (t) => t.sender === sender
-        );
-        const trackName = `${track.kind}-${i}`;
-        trackInfos.push({
-          trackName,
-          mid: transceiver?.mid || String(i),
-          kind: track.kind,
-        });
-        log(`Added local track: ${trackName} (${track.kind})`);
+      stream.getTracks().forEach((track) => {
+        pc.addTrack(track, stream);
+        log(`Added local track: ${track.kind} (id=${track.id.slice(0, 8)})`);
       });
 
-      // Create offer
+      // Create offer — mids are assigned after setLocalDescription
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      log("Created SDP offer");
+      log("Created SDP offer, set as local description");
+
+      // Now read mids from transceivers (they are assigned after setLocalDescription)
+      const trackInfos = pc.getTransceivers().map((t) => ({
+        trackName: `${t.sender.track?.kind || "unknown"}-${t.mid}`,
+        mid: t.mid || "",
+        kind: t.sender.track?.kind || "unknown",
+      }));
+      log(
+        `Track mids: ${trackInfos.map((t) => `${t.trackName}=${t.mid}`).join(", ")}`,
+      );
 
       // Send to backend
-      const res = await api.publish(roomId, offer.sdp!, trackInfos);
-      log(`Publish response: answer_sdp received, ${res.tracks?.length || 0} tracks confirmed`);
+      const res = await api.publish(
+        roomId,
+        pc.localDescription!.sdp,
+        trackInfos,
+      );
+      log(
+        `Publish response: answer_sdp=${!!res.answer_sdp}, ` +
+          `${res.tracks?.length || 0} tracks, renego=${res.requires_immediate_renegotiation}`,
+      );
 
       // Set remote answer
       if (res.answer_sdp) {
@@ -215,6 +244,8 @@ export function useWebRTC(roomId: string) {
           sdp: res.answer_sdp,
         });
         log("Set remote description (answer)");
+      } else {
+        log("WARNING: No answer SDP from publish!");
       }
 
       // Handle renegotiation if needed
@@ -222,7 +253,7 @@ export function useWebRTC(roomId: string) {
         log("Server requires immediate renegotiation...");
         const reOffer = await pc.createOffer();
         await pc.setLocalDescription(reOffer);
-        const reRes = await api.renegotiate(roomId, reOffer.sdp!);
+        const reRes = await api.renegotiate(roomId, pc.localDescription!.sdp);
         if (reRes.sdp) {
           await pc.setRemoteDescription({ type: reRes.type, sdp: reRes.sdp });
           log("Renegotiation complete");
@@ -235,7 +266,7 @@ export function useWebRTC(roomId: string) {
       log(`Publish failed: ${e.message}`);
       throw e;
     }
-  }, [roomId, state.iceServers, log]);
+  }, [roomId, state.iceServers, log, createPC]);
 
   // Step 3: Subscribe to a remote participant's tracks
   const subscribeTo = useCallback(
@@ -248,9 +279,10 @@ export function useWebRTC(roomId: string) {
 
         // Listen for incoming tracks
         pc.ontrack = (event) => {
-          log(`Remote track received: ${event.track.kind}`);
-          const stream =
-            event.streams[0] || new MediaStream([event.track]);
+          log(
+            `Remote track received: ${event.track.kind} (mid=${event.transceiver.mid})`,
+          );
+          const stream = event.streams[0] || new MediaStream([event.track]);
           setState((s) => {
             const updated = new Map(s.remoteStreams);
             updated.set(remoteSessionId, stream);
@@ -258,32 +290,61 @@ export function useWebRTC(roomId: string) {
           });
         };
 
+        // Add recvonly transceivers for each remote track
+        trackNames.forEach((name) => {
+          const kind = name.startsWith("video") ? "video" : "audio";
+          pc.addTransceiver(kind, { direction: "recvonly" });
+          log(`Added recvonly transceiver for ${name} (${kind})`);
+        });
+
+        // Create offer with the new transceivers
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        log("Created subscribe SDP offer");
+
         const tracks = trackNames.map((name) => ({
           trackName: name,
           sessionId: remoteSessionId,
         }));
 
-        const res = await api.subscribe(roomId, tracks);
-        log(`Subscribe response: answer_sdp received`);
+        // Send SDP offer + tracks to backend
+        const res = await api.subscribe(
+          roomId,
+          pc.localDescription!.sdp,
+          tracks,
+        );
+        log(
+          `Subscribe response: answer_sdp=${!!res.answer_sdp}, ` +
+            `tracks=${JSON.stringify(res.tracks?.map((t: any) => ({ name: t.trackName, error: t.errorCode })))}`,
+        );
 
         if (res.answer_sdp) {
           await pc.setRemoteDescription({
             type: res.answer_type || "answer",
             sdp: res.answer_sdp,
           });
+          log("Set subscribe remote description (answer)");
+        } else {
+          log("WARNING: No answer SDP in subscribe response!");
+          // Check if tracks have errors
+          res.tracks?.forEach((t: any) => {
+            if (t.errorCode)
+              log(
+                `Track error: ${t.trackName} — ${t.errorCode}: ${t.errorDescription}`,
+              );
+          });
+        }
 
-          // Send local answer back
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-
-          const answerRes = await api.subscribeAnswer(roomId, answer.sdp!);
-          if (answerRes.sdp) {
-            await pc.setRemoteDescription({
-              type: answerRes.type,
-              sdp: answerRes.sdp,
-            });
+        // Handle renegotiation if needed
+        if (res.requires_immediate_renegotiation) {
+          log("Subscribe requires renegotiation...");
+          const reOffer = await pc.createOffer();
+          await pc.setLocalDescription(reOffer);
+          const reRes = await api.renegotiate(roomId, pc.localDescription!.sdp);
+          if (reRes.sdp) {
+            await pc.setRemoteDescription({ type: reRes.type, sdp: reRes.sdp });
+            log("Subscribe renegotiation complete");
           }
-          log("Subscribe handshake complete");
         }
 
         return res;
@@ -292,7 +353,7 @@ export function useWebRTC(roomId: string) {
         throw e;
       }
     },
-    [roomId, log]
+    [roomId, log],
   );
 
   // Leave room
@@ -311,7 +372,7 @@ export function useWebRTC(roomId: string) {
       setState({
         sessionId: null,
         room: null,
-        iceServers: null,
+        iceServers: [],
         localStream: null,
         remoteStreams: new Map(),
       });
@@ -335,7 +396,11 @@ import React, { useState, useRef, useEffect } from "react";
 import { setToken, getConfig } from "./api";
 import { useWebRTC } from "./useWebRTC";
 
-function VideoPlayer({ stream, muted, label }: {
+function VideoPlayer({
+  stream,
+  muted,
+  label,
+}: {
   stream: MediaStream | null;
   muted: boolean;
   label: string;
@@ -364,7 +429,7 @@ export default function App() {
   const [token, setTokenInput] = useState("");
   const [roomId, setRoomId] = useState("");
   const [remoteSession, setRemoteSession] = useState("");
-  const [remoteTracks, setRemoteTracks] = useState("audio-0,video-1");
+  const [remoteTracks, setRemoteTracks] = useState("");
   const [config, setConfig] = useState<any>(null);
   const [connected, setConnected] = useState(false);
 
@@ -459,7 +524,9 @@ export default function App() {
 
           {/* Config */}
           {config && (
-            <pre style={{ background: "#f5f5f5", padding: 8, marginBottom: 16 }}>
+            <pre
+              style={{ background: "#f5f5f5", padding: 8, marginBottom: 16 }}
+            >
               {JSON.stringify(config, null, 2)}
             </pre>
           )}
@@ -467,9 +534,7 @@ export default function App() {
           {/* Room state */}
           {webrtc.room && (
             <details style={{ marginBottom: 16 }}>
-              <summary>
-                Room state (session: {webrtc.sessionId})
-              </summary>
+              <summary>Room state (session: {webrtc.sessionId})</summary>
               <pre style={{ background: "#f5f5f5", padding: 8 }}>
                 {JSON.stringify(webrtc.room, null, 2)}
               </pre>
@@ -493,7 +558,7 @@ export default function App() {
                   muted={false}
                   label={`Remote: ${sessionId.slice(0, 12)}...`}
                 />
-              )
+              ),
             )}
           </div>
 
@@ -530,39 +595,46 @@ export default function App() {
 2. Click **Set Token**
 3. Click **Get Config** — should show `webrtc_enabled: true`
 4. Click **Join Room** — logs show `Joined! session_id=...`
-5. Click **Publish Audio+Video** — browser asks for mic/camera permission, logs show SDP exchange
+5. Click **Publish Audio+Video** — browser asks for mic/camera permission, then watch logs for:
+   - `Created SDP offer` — local tracks added
+   - `Track mids: audio-0=0, video-1=1` — mids assigned
+   - `ICE connection: checking` → `connected` — media path established
+   - `PC connection: connected` — fully connected
 6. Click **Leave Room** — cleanup
 
 ### Two-user test (full publish + subscribe)
 
 **Tab 1 (Publisher):**
+
 1. Set token for User A, set room_id
 2. Join Room → note the `session_id` from logs
 3. Publish Audio+Video → tracks published
 
 **Tab 2 (Subscriber):**
+
 1. Set token for User B, same room_id
 2. Join Room
-3. Paste User A's `session_id` into "Remote session ID"
-4. Set track names to `audio-0,video-1`
-5. Click Subscribe → remote video should appear
+3. Publish Audio+Video (needed to create the PeerConnection)
+4. Paste User A's `session_id` into "Remote session ID"
+5. Copy User A's track names from their log (e.g., `audio-0,video-1`)
+6. Click Subscribe → check logs for ICE connection state and remote track events
 
 ---
 
 ## 6. API Endpoints Reference
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/webrtc/config` | Feature flags and capabilities |
-| `POST` | `/webrtc/credentials` | TURN/STUN ICE credentials |
-| `POST` | `/webrtc/rooms/:room_id/join` | Join room, get CF session |
-| `POST` | `/webrtc/rooms/:room_id/publish` | Publish local tracks (send offer, get answer) |
-| `POST` | `/webrtc/rooms/:room_id/unpublish` | Stop publishing tracks |
-| `POST` | `/webrtc/rooms/:room_id/subscribe` | Subscribe to remote tracks |
-| `POST` | `/webrtc/rooms/:room_id/subscribe/answer` | Complete subscribe renegotiation |
-| `POST` | `/webrtc/rooms/:room_id/unsubscribe` | Stop subscribing to tracks |
-| `POST` | `/webrtc/rooms/:room_id/renegotiate` | ICE restart or SDP update |
-| `POST` | `/webrtc/rooms/:room_id/leave` | Leave room, cleanup |
+| Method | Path                                      | Purpose                                       |
+| ------ | ----------------------------------------- | --------------------------------------------- |
+| `GET`  | `/webrtc/config`                          | Feature flags and capabilities                |
+| `POST` | `/webrtc/credentials`                     | TURN/STUN ICE credentials                     |
+| `POST` | `/webrtc/rooms/:room_id/join`             | Join room, get CF session                     |
+| `POST` | `/webrtc/rooms/:room_id/publish`          | Publish local tracks (send offer, get answer) |
+| `POST` | `/webrtc/rooms/:room_id/unpublish`        | Stop publishing tracks                        |
+| `POST` | `/webrtc/rooms/:room_id/subscribe`        | Subscribe to remote tracks                    |
+| `POST` | `/webrtc/rooms/:room_id/subscribe/answer` | Complete subscribe renegotiation              |
+| `POST` | `/webrtc/rooms/:room_id/unsubscribe`      | Stop subscribing to tracks                    |
+| `POST` | `/webrtc/rooms/:room_id/renegotiate`      | ICE restart or SDP update                     |
+| `POST` | `/webrtc/rooms/:room_id/leave`            | Leave room, cleanup                           |
 
 All endpoints require `Authorization: Bearer <token>` header or `?token=<token>` query param.
 
@@ -572,14 +644,14 @@ All endpoints require `Authorization: Bearer <token>` header or `?token=<token>`
 
 The backend broadcasts these signals on ActionCable channel `chat_{room_id}`:
 
-| Action | When | Key Fields |
-|--------|------|------------|
-| `participant_joined` | User joins room | `participant.uuid`, `participant.session_id` |
-| `tracks_published` | User publishes tracks | `publisher.session_id`, `tracks[]` |
-| `tracks_unpublished` | User unpublishes | `publisher.uuid`, `track_names[]` |
-| `participant_left` | User leaves | `participant.uuid`, `reason`, `remaining_count` |
-| `media_state_changed` | Mute/unmute | `sender_uuid`, `audio_muted`, `video_muted` |
-| `force_mute` | Admin mutes user | `target_uuid`, `sender_uuid` |
+| Action                | When                  | Key Fields                                      |
+| --------------------- | --------------------- | ----------------------------------------------- |
+| `participant_joined`  | User joins room       | `participant.uuid`, `participant.session_id`    |
+| `tracks_published`    | User publishes tracks | `publisher.session_id`, `tracks[]`              |
+| `tracks_unpublished`  | User unpublishes      | `publisher.uuid`, `track_names[]`               |
+| `participant_left`    | User leaves           | `participant.uuid`, `reason`, `remaining_count` |
+| `media_state_changed` | Mute/unmute           | `sender_uuid`, `audio_muted`, `video_muted`     |
+| `force_mute`          | Admin mutes user      | `target_uuid`, `sender_uuid`                    |
 
 Listen for `message_type: 'webrtc_signal'` on the chat channel.
 
@@ -587,10 +659,10 @@ Listen for `message_type: 'webrtc_signal'` on the chat channel.
 
 ## 8. Error Responses
 
-| Status | Meaning |
-|--------|---------|
-| `401` | Missing or invalid auth token |
-| `403` | Not in room (must join first) |
-| `429` | Cloudflare rate limit |
-| `502` | Cloudflare SFU/TURN API error |
-| `503` | WebRTC feature disabled (`WEBRTC_ENABLED=false`) |
+| Status | Meaning                                          |
+| ------ | ------------------------------------------------ |
+| `401`  | Missing or invalid auth token                    |
+| `403`  | Not in room (must join first)                    |
+| `429`  | Cloudflare rate limit                            |
+| `502`  | Cloudflare SFU/TURN API error                    |
+| `503`  | WebRTC feature disabled (`WEBRTC_ENABLED=false`) |
