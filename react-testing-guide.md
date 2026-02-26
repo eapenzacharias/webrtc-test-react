@@ -65,10 +65,12 @@ export const joinRoom = (roomId: string, participantType = "publisher") =>
 // POST /webrtc/rooms/:room_id/publish
 export const publish = (
   roomId: string,
+  sessionId: string,
   sdp: string,
   tracks: { trackName: string; mid: string; kind: string }[],
 ) =>
   request("POST", `/webrtc/rooms/${roomId}/publish`, {
+    session_id: sessionId,
     sdp,
     type: "offer",
     tracks,
@@ -77,25 +79,33 @@ export const publish = (
 // POST /webrtc/rooms/:room_id/subscribe
 export const subscribe = (
   roomId: string,
+  sessionId: string,
   sdp: string,
   tracks: { trackName: string; sessionId: string }[],
 ) =>
   request("POST", `/webrtc/rooms/${roomId}/subscribe`, {
+    session_id: sessionId,
     sdp,
     type: "offer",
     tracks,
   });
 
 // POST /webrtc/rooms/:room_id/subscribe/answer
-export const subscribeAnswer = (roomId: string, sdp: string) =>
+export const subscribeAnswer = (
+  roomId: string,
+  sessionId: string,
+  sdp: string,
+) =>
   request("POST", `/webrtc/rooms/${roomId}/subscribe/answer`, {
+    session_id: sessionId,
     sdp,
     type: "answer",
   });
 
 // POST /webrtc/rooms/:room_id/renegotiate
-export const renegotiate = (roomId: string, sdp: string) =>
+export const renegotiate = (roomId: string, sessionId: string, sdp: string) =>
   request("POST", `/webrtc/rooms/${roomId}/renegotiate`, {
+    session_id: sessionId,
     sdp,
     type: "offer",
   });
@@ -226,9 +236,10 @@ export function useWebRTC(roomId: string) {
         `Track mids: ${trackInfos.map((t) => `${t.trackName}=${t.mid}`).join(", ")}`,
       );
 
-      // Send to backend
+      // Send to backend (include session_id for cleanup-worker resilience)
       const res = await api.publish(
         roomId,
+        state.sessionId!,
         pc.localDescription!.sdp,
         trackInfos,
       );
@@ -253,7 +264,11 @@ export function useWebRTC(roomId: string) {
         log("Server requires immediate renegotiation...");
         const reOffer = await pc.createOffer();
         await pc.setLocalDescription(reOffer);
-        const reRes = await api.renegotiate(roomId, pc.localDescription!.sdp);
+        const reRes = await api.renegotiate(
+          roomId,
+          state.sessionId!,
+          pc.localDescription!.sdp,
+        );
         if (reRes.sdp) {
           await pc.setRemoteDescription({ type: reRes.type, sdp: reRes.sdp });
           log("Renegotiation complete");
@@ -266,7 +281,7 @@ export function useWebRTC(roomId: string) {
       log(`Publish failed: ${e.message}`);
       throw e;
     }
-  }, [roomId, state.iceServers, log, createPC]);
+  }, [roomId, state.sessionId, state.iceServers, log, createPC]);
 
   // Step 3: Subscribe to a remote participant's tracks
   const subscribeTo = useCallback(
@@ -307,9 +322,10 @@ export function useWebRTC(roomId: string) {
           sessionId: remoteSessionId,
         }));
 
-        // Send SDP offer + tracks to backend
+        // Send SDP offer + tracks to backend (include session_id for cleanup-worker resilience)
         const res = await api.subscribe(
           roomId,
+          state.sessionId!,
           pc.localDescription!.sdp,
           tracks,
         );
@@ -340,7 +356,11 @@ export function useWebRTC(roomId: string) {
           log("Subscribe requires renegotiation...");
           const reOffer = await pc.createOffer();
           await pc.setLocalDescription(reOffer);
-          const reRes = await api.renegotiate(roomId, pc.localDescription!.sdp);
+          const reRes = await api.renegotiate(
+            roomId,
+            state.sessionId!,
+            pc.localDescription!.sdp,
+          );
           if (reRes.sdp) {
             await pc.setRemoteDescription({ type: reRes.type, sdp: reRes.sdp });
             log("Subscribe renegotiation complete");
